@@ -162,7 +162,7 @@ func getTotalTollCostForDateRange(c *gin.Context) {
 			{Key: "as", Value: "vehicle_details"},
 		}}},
 
-		// Optionally, you can unwind the vehicle details array
+		// Optionally, unwind the vehicle details array
 		{{Key: "$unwind", Value: bson.D{
 			{Key: "path", Value: "$vehicle_details"},
 			{Key: "preserveNullAndEmptyArrays", Value: true}, // Optional: keep results without vehicle details
@@ -178,12 +178,17 @@ func getTotalTollCostForDateRange(c *gin.Context) {
 	}
 	defer cursor.Close(context.TODO())
 
-	// Create a slice to store the result in the desired format
-	var vehicleTollList []struct {
-		VehicleID     string        `json:"vehicle_id"`
-		TollCost      float64       `json:"toll_cost"`
-		VehicleDetail VehicleDetail `json:"vehicle_detail,omitempty"`
+	// Define a new struct for the flattened response
+	type VehicleToll struct {
+		VehicleID string  `json:"vehicle_id"`
+		TollCost  float64 `json:"toll_cost"`
+		VIN       string  `json:"vin"`
+		Name      string  `json:"name"`
+		Model     string  `json:"model"`
+		Make      string  `json:"make"`
 	}
+
+	var vehicleTollList []VehicleToll
 
 	for cursor.Next(context.TODO()) {
 		var result struct {
@@ -198,18 +203,29 @@ func getTotalTollCostForDateRange(c *gin.Context) {
 			return
 		}
 
-		// Append each result as an object with "vehicle_id", "toll_cost", and vehicle details
-		vehicleTollList = append(vehicleTollList, struct {
-			VehicleID     string        `json:"vehicle_id"`
-			TollCost      float64       `json:"toll_cost"`
-			VehicleDetail VehicleDetail `json:"vehicle_detail,omitempty"`
-		}{
-			VehicleID:     result.VehicleID,
-			TollCost:      result.TotalTollCost,
-			VehicleDetail: result.VehicleDetail,
+		// Ensure that VehicleDetail is not nil
+		if (VehicleDetail{}) == result.VehicleDetail {
+			// Handle cases where vehicle_details are missing if necessary
+			// For now, we'll leave the fields empty
+		}
+
+		// Append each result as a flattened object with "vehicle_id", "toll_cost", and vehicle details
+		vehicleTollList = append(vehicleTollList, VehicleToll{
+			VehicleID: result.VehicleID,
+			TollCost:  result.TotalTollCost,
+			VIN:       result.VehicleDetail.VIN,
+			Name:      result.VehicleDetail.Name,
+			Model:     result.VehicleDetail.Model,
+			Make:      result.VehicleDetail.Make,
 		})
 	}
 
+	if err := cursor.Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Cursor error while fetching toll data"})
+		return
+	}
+
+	// Return the flattened data in the response
 	c.JSON(http.StatusOK, gin.H{
 		"data": vehicleTollList,
 	})
@@ -245,8 +261,7 @@ func FetchTollsForUser(c *gin.Context) {
 		return
 	}
 
-	// Fetch trips for the user within the date range, using parsed times instead of strings
-	var trips []TripDetail
+	// Fetch trips for the user within the date range, using parsed times
 	tripCursor, err := tripCollection.Find(context.TODO(), bson.M{
 		"user_id": userID,
 		"start_time": bson.M{
@@ -262,7 +277,8 @@ func FetchTollsForUser(c *gin.Context) {
 	}
 	defer tripCursor.Close(context.TODO())
 
-	var tripsWithTolls []TripWithTolls
+	// Result slice to store the flattened structure
+	var tripsWithTolls []gin.H
 
 	// Iterate through trips and fetch tolls for each trip
 	for tripCursor.Next(context.TODO()) {
@@ -272,11 +288,8 @@ func FetchTollsForUser(c *gin.Context) {
 			return
 		}
 
-		// Append the trip to the trips slice
-		trips = append(trips, trip)
-
 		// Fetch tolls corresponding to the trip's start_time and end_time
-		var tolls []TollData
+		var tolls []gin.H
 		tollCursor, err := tollCollection.Find(context.TODO(), bson.M{
 			"user_id": userID,
 			"entry_time": bson.M{
@@ -290,20 +303,39 @@ func FetchTollsForUser(c *gin.Context) {
 		}
 		defer tollCursor.Close(context.TODO())
 
-		// Decode each toll record and append to the tolls slice
+		// Decode each toll record and add it to the tolls slice
 		for tollCursor.Next(context.TODO()) {
 			var toll TollData
 			if err := tollCursor.Decode(&toll); err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to decode toll"})
 				return
 			}
-			tolls = append(tolls, toll)
+			tolls = append(tolls, gin.H{
+				"id":                toll.ID,
+				"geoFence_id_start": toll.GeoFenceIDStart,
+				"name_start":        toll.NameStart,
+				"road_start":        toll.RoadStart,
+				"toll_system_type":  toll.TollSystemType,
+				"entry_lat":         toll.EntryLat,
+				"entry_lng":         toll.EntryLng,
+				"tag_cost":          toll.TagCost,
+				"tag_and_cash_cost": toll.TagAndCashCost,
+				"entry_time":        toll.EntryTime,
+				"toll_agency_name":  toll.TollAgencyName,
+				"toll_agency_abbr":  toll.TollAgencyAbbr,
+				"job_id":            toll.JobID,
+			})
 		}
 
-		// Create a TripWithTolls object for the trip and corresponding tolls
-		tripsWithTolls = append(tripsWithTolls, TripWithTolls{
-			Trip:  trip,
-			Tolls: tolls,
+		// Append the trip details along with the tolls as a flattened structure
+		tripsWithTolls = append(tripsWithTolls, gin.H{
+			"id":          trip.ID,
+			"user_id":     trip.UserID,
+			"marketplace": trip.Marketplace,
+			"start_time":  trip.StartTime,
+			"end_time":    trip.EndTime,
+			"vehicle_id":  trip.VehicleID,
+			"tolls":       tolls,
 		})
 	}
 
@@ -312,10 +344,8 @@ func FetchTollsForUser(c *gin.Context) {
 		return
 	}
 
-	// You can use `trips` here if you need to do something with the trip data
-
-	// Return trips with tolls in the response
-	c.JSON(http.StatusOK, gin.H{"trips_with_tolls": tripsWithTolls})
+	// Return the flattened result in the response
+	c.JSON(http.StatusOK, gin.H{"data": tripsWithTolls})
 }
 
 func main() {
