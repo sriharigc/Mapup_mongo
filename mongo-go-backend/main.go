@@ -49,6 +49,13 @@ type TollData struct {
 	TollAgencyAbbr   []string           `bson:"toll_agency_abbr,omitempty" json:"toll_agency_abbr,omitempty"`
 	JobID            string             `bson:"job_id" json:"job_id"`
 }
+type VehicleDetail struct {
+	VehicleID string `bson:"vehicle_id" json:"vehicle_id"`
+	VIN       string `bson:"vin" json:"vin"`
+	Name      string `bson:"name" json:"name"`
+	Model     string `bson:"model" json:"model"`
+	Make      string `bson:"make" json:"make"`
+}
 type TripWithTolls struct {
 	Trip  TripDetail `json:"trip"`
 	Tolls []TollData `json:"tolls"`
@@ -133,16 +140,32 @@ func getTotalTollCostForDateRange(c *gin.Context) {
 				{Key: "dateString", Value: "$entry_time"},
 			}}}},
 		}}},
+
 		// Match documents based on user ID and date range
 		{{Key: "$match", Value: bson.D{
 			{Key: "user_id", Value: userID},
 			{Key: "entry_time", Value: bson.D{{Key: "$gte", Value: startTime}}},
 			{Key: "entry_time", Value: bson.D{{Key: "$lte", Value: endTime}}},
 		}}},
+
 		// Group by vehicle_id and sum the total toll cost
 		{{Key: "$group", Value: bson.D{
 			{Key: "_id", Value: "$vehicle_id"},
 			{Key: "totalTollCost", Value: bson.D{{Key: "$sum", Value: "$tag_and_cash_cost"}}},
+		}}},
+
+		// Lookup vehicle details
+		{{Key: "$lookup", Value: bson.D{
+			{Key: "from", Value: "Mongo collection 3"},
+			{Key: "localField", Value: "_id"},
+			{Key: "foreignField", Value: "vehicle_id"},
+			{Key: "as", Value: "vehicle_details"},
+		}}},
+
+		// Optionally, you can unwind the vehicle details array
+		{{Key: "$unwind", Value: bson.D{
+			{Key: "path", Value: "$vehicle_details"},
+			{Key: "preserveNullAndEmptyArrays", Value: true}, // Optional: keep results without vehicle details
 		}}},
 	}
 
@@ -157,14 +180,16 @@ func getTotalTollCostForDateRange(c *gin.Context) {
 
 	// Create a slice to store the result in the desired format
 	var vehicleTollList []struct {
-		VehicleID string  `json:"vehicle_id"`
-		TollCost  float64 `json:"toll_cost"`
+		VehicleID     string        `json:"vehicle_id"`
+		TollCost      float64       `json:"toll_cost"`
+		VehicleDetail VehicleDetail `json:"vehicle_detail,omitempty"`
 	}
 
 	for cursor.Next(context.TODO()) {
 		var result struct {
-			VehicleID     string  `bson:"_id"`
-			TotalTollCost float64 `bson:"totalTollCost"`
+			VehicleID     string        `bson:"_id"`
+			TotalTollCost float64       `bson:"totalTollCost"`
+			VehicleDetail VehicleDetail `bson:"vehicle_details"`
 		}
 		if err := cursor.Decode(&result); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
@@ -172,13 +197,16 @@ func getTotalTollCostForDateRange(c *gin.Context) {
 			})
 			return
 		}
-		// Append each result as an object with "vehicle_id" and "toll_cost"
+
+		// Append each result as an object with "vehicle_id", "toll_cost", and vehicle details
 		vehicleTollList = append(vehicleTollList, struct {
-			VehicleID string  `json:"vehicle_id"`
-			TollCost  float64 `json:"toll_cost"`
+			VehicleID     string        `json:"vehicle_id"`
+			TollCost      float64       `json:"toll_cost"`
+			VehicleDetail VehicleDetail `json:"vehicle_detail,omitempty"`
 		}{
-			VehicleID: result.VehicleID,
-			TollCost:  result.TotalTollCost,
+			VehicleID:     result.VehicleID,
+			TollCost:      result.TotalTollCost,
+			VehicleDetail: result.VehicleDetail,
 		})
 	}
 
